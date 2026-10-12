@@ -19,6 +19,7 @@ type Router struct {
 	gateway string
 	ifIndex string
 	ifAlias string          // selected interface, "" = auto
+	flushed bool            // DNS flushed since last gateway detect
 	applied map[string]bool // "prefix" -> route present
 }
 
@@ -113,6 +114,12 @@ func (r *Router) Apply(prefixes []string, ifAlias string) error {
 			continue
 		}
 		logf("route add %s via %s IF %s ok", p, r.gateway, r.ifIndex)
+		if !r.flushed {
+			// drop stale resolver/browser-friendly answers so apps
+			// reconnect through the new routes
+			_ = exec.Command("ipconfig", "/flushdns").Run()
+			r.flushed = true
+		}
 		r.applied[p] = true
 	}
 	return firstErr
@@ -156,4 +163,5 @@ func (r *Router) restoreLocked() {
 	}
 	r.gateway = ""
 	r.ifIndex = ""
+	r.flushed = false
 }
