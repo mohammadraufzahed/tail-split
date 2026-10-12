@@ -66,10 +66,12 @@ func (r *Router) Apply(prefixes []string, ifAlias string) error {
 	if r.gateway == "" {
 		gw, ifi, err := defaultGateway(ifAlias)
 		if err != nil {
+			logf("gateway detect failed: %v", err)
 			return fmt.Errorf("default gateway: %w", err)
 		}
 		r.gateway = gw
 		r.ifIndex = ifi
+		logf("gateway detected: %s via interface %s (alias %q)", gw, ifi, ifAlias)
 	}
 	var firstErr error
 	for _, p := range prefixes {
@@ -96,14 +98,31 @@ func (r *Router) Apply(prefixes []string, ifAlias string) error {
 		out, err := exec.Command("route", "add", ipnet.IP.String(), "mask", mask,
 			r.gateway, "metric", "1", "IF", r.ifIndex).CombinedOutput()
 		if err != nil {
+			logf("route add %s via %s IF %s failed: %v (%s) — retrying without IF",
+				p, r.gateway, r.ifIndex, err, strings.TrimSpace(string(out)))
+			// fallback: let Windows pick the interface from the gateway
+			out, err = exec.Command("route", "add", ipnet.IP.String(), "mask", mask,
+				r.gateway, "metric", "1").CombinedOutput()
+		}
+		if err != nil {
+			logf("route add %s via %s FAILED: %v (%s)",
+				p, r.gateway, err, strings.TrimSpace(string(out)))
 			if firstErr == nil {
 				firstErr = fmt.Errorf("route add %s: %v (%s)", p, err, strings.TrimSpace(string(out)))
 			}
 			continue
 		}
+		logf("route add %s via %s IF %s ok", p, r.gateway, r.ifIndex)
 		r.applied[p] = true
 	}
 	return firstErr
+}
+
+// Count reports how many exclusion routes are currently installed.
+func (r *Router) Count() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.applied)
 }
 
 // Restore removes all routes previously added by Apply.
@@ -127,7 +146,12 @@ func (r *Router) restoreLocked() {
 			continue
 		}
 		mask := net.IP(ipnet.Mask).String()
-		_ = exec.Command("route", "delete", ipnet.IP.String(), "mask", mask, r.gateway).Run()
+		out, err := exec.Command("route", "delete", ipnet.IP.String(), "mask", mask, r.gateway).CombinedOutput()
+		if err != nil {
+			logf("route delete %s FAILED: %v (%s)", p, err, strings.TrimSpace(string(out)))
+		} else {
+			logf("route delete %s ok", p)
+		}
 		delete(r.applied, p)
 	}
 	r.gateway = ""

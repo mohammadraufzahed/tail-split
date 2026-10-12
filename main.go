@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	_ "embed"
+	"fmt"
 	"os/exec"
 	"sync"
 	"time"
@@ -27,6 +28,8 @@ type app struct {
 	exitName   string
 
 	mStatus    *systray.MenuItem
+	mRoutes    *systray.MenuItem
+	mCheck     *systray.MenuItem
 	mToggle    *systray.MenuItem
 	mEntries   *systray.MenuItem
 	mIface     *systray.MenuItem
@@ -35,6 +38,8 @@ type app struct {
 }
 
 func main() {
+	initLog()
+	logf("tail-split %s starting", buildVersion)
 	if !isAdmin() {
 		if err := relaunchElevated(); err == nil {
 			return // elevated instance takes over
@@ -55,12 +60,19 @@ func onReady() {
 
 	a.mStatus = systray.AddMenuItem("Exit node: detecting…", "Current Tailscale exit node status")
 	a.mStatus.Disable()
+	a.mRoutes = systray.AddMenuItem("Routes: 0 active", "Exclusion routes currently installed")
+	a.mRoutes.Disable()
 	systray.AddSeparator()
 	a.mToggle = systray.AddMenuItemCheckbox("Enabled", "Enable/disable all exclusions", a.store.Config().Enabled)
 	mAdd := systray.AddMenuItem("Add exclusion…", "Exclude an IP, CIDR, or domain")
 	a.mEntries = systray.AddMenuItem("Exclusions", "Destinations kept off the exit node")
 	a.mIface = systray.AddMenuItem("Interface", "Interface that carries excluded traffic")
 	systray.AddSeparator()
+	mDiag := systray.AddMenuItem("Diagnostics", "Check routes and view the log")
+	mCheck := mDiag.AddSubMenuItem("Run check", "Ping excluded destinations via the physical interface")
+	mOpenLog := mDiag.AddSubMenuItem("Open log", "Open tail-split.log")
+	a.mCheck = mDiag.AddSubMenuItem("", "")
+	a.mCheck.Hide()
 	mEdit := systray.AddMenuItem("Open config…", "Edit config.json in your editor")
 	mQuit := systray.AddMenuItem("Quit", "Remove managed routes and exit")
 
@@ -70,7 +82,8 @@ func onReady() {
 
 	a.rebuildEntries()
 	a.rebuildIfaces()
-	go a.eventLoop(cancel, statusCh, mAdd.ClickedCh, mEdit.ClickedCh, mQuit.ClickedCh)
+	go a.eventLoop(cancel, statusCh, mAdd.ClickedCh, mEdit.ClickedCh, mQuit.ClickedCh,
+		mCheck.ClickedCh, mOpenLog.ClickedCh)
 }
 
 func onExit() {
@@ -156,13 +169,18 @@ func (a *app) refreshNow() {
 	a.mu.Unlock()
 	cfg := a.store.Config()
 	if active && cfg.Enabled {
-		_ = a.router.Apply(Resolve(context.Background(), cfg.Entries), cfg.Interface)
+		prefixes := Resolve(context.Background(), cfg.Entries)
+		logf("apply: %d entries -> %d prefixes %v", len(cfg.Entries), len(prefixes), prefixes)
+		if err := a.router.Apply(prefixes, cfg.Interface); err != nil {
+			logf("apply error: %v", err)
+		}
 	} else {
 		a.router.Restore()
 	}
+	a.mRoutes.SetTitle(fmt.Sprintf("Routes: %d active", a.router.Count()))
 }
 
-func (a *app) eventLoop(cancel context.CancelFunc, statusCh <-chan ExitNodeStatus, addCh, editCh, quitCh <-chan struct{}) {
+func (a *app) eventLoop(cancel context.CancelFunc, statusCh <-chan ExitNodeStatus, addCh, editCh, quitCh, checkCh, openLogCh <-chan struct{}) {
 	reResolve := time.NewTicker(reResolveInterval)
 	defer reResolve.Stop()
 	for {
@@ -172,10 +190,15 @@ func (a *app) eventLoop(cancel context.CancelFunc, statusCh <-chan ExitNodeStatu
 			a.exitActive = st.Active
 			a.exitName = st.ExitNode
 			a.mu.Unlock()
-			if st.Active {
+			if !st.CLI {
+				a.mStatus.SetTitle("Tailscale CLI not found")
+				logf("tailscale CLI not responding — is it installed and on PATH?")
+			} else if st.Active {
 				a.mStatus.SetTitle("Exit node: " + st.ExitNode)
+				logf("exit node connected: %s", st.ExitNode)
 			} else {
 				a.mStatus.SetTitle("Exit node: not connected")
+				logf("exit node disconnected")
 			}
 			a.refreshNow()
 		case <-reResolve.C:
@@ -202,6 +225,14 @@ func (a *app) eventLoop(cancel context.CancelFunc, statusCh <-chan ExitNodeStatu
 				}
 				a.refreshNow()
 			}
+		case <-checkCh:
+			go func() {
+				res := a.router.RunCheck()
+				a.mCheck.SetTitle(res)
+				a.mCheck.Show()
+			}()
+		case <-openLogCh:
+			_ = exec.Command("cmd", "/c", "start", "", logPath).Start()
 		case <-editCh:
 			_ = exec.Command("cmd", "/c", "start", "", a.store.Path()).Start()
 		case <-quitCh:
