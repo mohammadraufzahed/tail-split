@@ -17,6 +17,8 @@ import (
 type Router struct {
 	mu      sync.Mutex
 	gateway string
+	ifIndex string
+	ifAlias string          // selected interface, "" = auto
 	applied map[string]bool // "prefix" -> route present
 }
 
@@ -24,42 +26,50 @@ func NewRouter() *Router {
 	return &Router{applied: map[string]bool{}}
 }
 
-// defaultGateway returns the next-hop of the physical default route,
-// skipping the Tailscale interface. PowerShell is used because parsing
+// defaultGateway returns the next-hop and interface index of the physical
+// default route, skipping the Tailscale interface. When ifAlias is set,
+// only that interface is considered. PowerShell is used because parsing
 // `route print` output is brittle.
-func defaultGateway() (string, error) {
-	ps := `Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue |` +
-		` Where-Object { $_.NextHop -ne '0.0.0.0' -and $_.InterfaceAlias -notmatch 'Tailscale' } |` +
-		` Sort-Object { $_.RouteMetric + $_.InterfaceMetric } | Select-Object -First 1 -ExpandProperty NextHop`
+func defaultGateway(ifAlias string) (gw string, ifIndex string, err error) {
+	filter := `$_.InterfaceAlias -notmatch 'Tailscale'`
+	if ifAlias != "" {
+		filter = `$_.InterfaceAlias -eq '` + strings.ReplaceAll(ifAlias, "'", "''") + `'`
+	}
+	ps := `$r = Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue |` +
+		` Where-Object { $_.NextHop -ne '0.0.0.0' -and ` + filter + ` } |` +
+		` Sort-Object { $_.RouteMetric + $_.InterfaceMetric } | Select-Object -First 1;` +
+		` if ($r) { "$($r.NextHop) $($r.InterfaceIndex)" }`
 	out, err := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command", ps).Output()
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
-	gw := strings.TrimSpace(string(out))
-	if gw == "" {
-		return "", errors.New("no physical default gateway found")
+	fields := strings.Fields(strings.TrimSpace(string(out)))
+	if len(fields) < 2 {
+		return "", "", errors.New("no physical default gateway found")
 	}
-	return gw, nil
-}
-
-func cidrToMask(prefixLen int) string {
-	ip := net.CIDRMask(prefixLen, 32)
-	return net.IP(ip).String()
+	return fields[0], fields[1], nil
 }
 
 // Apply adds routes for the given CIDR prefixes (e.g. "1.2.3.4/32").
-func (r *Router) Apply(prefixes []string) error {
+// ifAlias selects the carrying interface ("" = auto-detect); changing it
+// re-detects the gateway and re-pins all routes.
+func (r *Router) Apply(prefixes []string, ifAlias string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if ifAlias != r.ifAlias {
+		r.restoreLocked()
+		r.ifAlias = ifAlias
+	}
 	if len(prefixes) == 0 {
 		return nil
 	}
 	if r.gateway == "" {
-		gw, err := defaultGateway()
+		gw, ifi, err := defaultGateway(ifAlias)
 		if err != nil {
 			return fmt.Errorf("default gateway: %w", err)
 		}
 		r.gateway = gw
+		r.ifIndex = ifi
 	}
 	var firstErr error
 	for _, p := range prefixes {
@@ -80,7 +90,11 @@ func (r *Router) Apply(prefixes []string) error {
 			p = ipnet.String()
 		}
 		mask := net.IP(ipnet.Mask).String()
-		out, err := exec.Command("route", "add", ipnet.IP.String(), "mask", mask, r.gateway, "metric", "1").CombinedOutput()
+		// IF pins the route to the physical interface — without it Windows
+		// can bind the route to the Tailscale interface and the excluded
+		// traffic dies inside the tunnel.
+		out, err := exec.Command("route", "add", ipnet.IP.String(), "mask", mask,
+			r.gateway, "metric", "1", "IF", r.ifIndex).CombinedOutput()
 		if err != nil {
 			if firstErr == nil {
 				firstErr = fmt.Errorf("route add %s: %v (%s)", p, err, strings.TrimSpace(string(out)))
@@ -96,6 +110,11 @@ func (r *Router) Apply(prefixes []string) error {
 func (r *Router) Restore() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.restoreLocked()
+	r.ifAlias = ""
+}
+
+func (r *Router) restoreLocked() {
 	var keys []string
 	for p := range r.applied {
 		keys = append(keys, p)
@@ -112,4 +131,5 @@ func (r *Router) Restore() {
 		delete(r.applied, p)
 	}
 	r.gateway = ""
+	r.ifIndex = ""
 }

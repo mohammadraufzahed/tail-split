@@ -29,7 +29,9 @@ type app struct {
 	mStatus    *systray.MenuItem
 	mToggle    *systray.MenuItem
 	mEntries   *systray.MenuItem
+	mIface     *systray.MenuItem
 	entryItems []*systray.MenuItem
+	ifaceItems []*systray.MenuItem
 }
 
 func main() {
@@ -57,6 +59,7 @@ func onReady() {
 	a.mToggle = systray.AddMenuItemCheckbox("Enabled", "Enable/disable all exclusions", a.store.Config().Enabled)
 	mAdd := systray.AddMenuItem("Add exclusion…", "Exclude an IP, CIDR, or domain")
 	a.mEntries = systray.AddMenuItem("Exclusions", "Destinations kept off the exit node")
+	a.mIface = systray.AddMenuItem("Interface", "Interface that carries excluded traffic")
 	systray.AddSeparator()
 	mEdit := systray.AddMenuItem("Open config…", "Edit config.json in your editor")
 	mQuit := systray.AddMenuItem("Quit", "Remove managed routes and exit")
@@ -66,6 +69,7 @@ func onReady() {
 	go PollExitNode(ctx, statusCh)
 
 	a.rebuildEntries()
+	a.rebuildIfaces()
 	go a.eventLoop(cancel, statusCh, mAdd.ClickedCh, mEdit.ClickedCh, mQuit.ClickedCh)
 }
 
@@ -112,6 +116,39 @@ func (a *app) rebuildEntries() {
 	}
 }
 
+// rebuildIfaces refreshes the Interface submenu: Auto-detect plus every
+// interface that currently has a non-Tailscale default route.
+func (a *app) rebuildIfaces() {
+	for _, it := range a.ifaceItems {
+		it.Hide()
+	}
+	a.ifaceItems = nil
+
+	sel := a.store.Config().Interface
+	auto := a.mIface.AddSubMenuItemCheckbox("Auto-detect", "", sel == "")
+	a.ifaceItems = append(a.ifaceItems, auto)
+	go func(ch <-chan struct{}) {
+		for range ch {
+			a.store.SetInterface("")
+			a.refreshNow()
+			a.rebuildIfaces()
+		}
+	}(auto.ClickedCh)
+
+	for _, alias := range Interfaces() {
+		al := alias
+		it := a.mIface.AddSubMenuItemCheckbox(al, "", sel == al)
+		a.ifaceItems = append(a.ifaceItems, it)
+		go func(ch <-chan struct{}) {
+			for range ch {
+				a.store.SetInterface(al)
+				a.refreshNow()
+				a.rebuildIfaces()
+			}
+		}(it.ClickedCh)
+	}
+}
+
 // refreshNow re-resolves and applies/removes routes immediately.
 func (a *app) refreshNow() {
 	a.mu.Lock()
@@ -119,7 +156,7 @@ func (a *app) refreshNow() {
 	a.mu.Unlock()
 	cfg := a.store.Config()
 	if active && cfg.Enabled {
-		_ = a.router.Apply(Resolve(context.Background(), cfg.Entries))
+		_ = a.router.Apply(Resolve(context.Background(), cfg.Entries), cfg.Interface)
 	} else {
 		a.router.Restore()
 	}

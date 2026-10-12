@@ -11,6 +11,9 @@ import (
 type Config struct {
 	// Enabled globally enables/disables exclusions without clearing entries.
 	Enabled bool `json:"enabled"`
+	// Interface is the alias of the network interface that carries excluded
+	// traffic (e.g. "Ethernet", "Wi-Fi"). Empty = auto-detect.
+	Interface string `json:"interface"`
 	// Entries are the things to keep off the exit node.
 	// Each is an IPv4 address ("1.2.3.4"), CIDR ("10.0.0.0/8") or hostname ("example.com").
 	Entries []Entry `json:"entries"`
@@ -68,6 +71,13 @@ func (s *Store) Config() Config {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.cfg
+}
+
+func (s *Store) SetInterface(alias string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cfg.Interface = alias
+	s.saveLocked()
 }
 
 func (s *Store) SetEnabled(on bool) {

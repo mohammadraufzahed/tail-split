@@ -32,6 +32,10 @@ excluded destinations via the physical default gateway instead.
 - **Enabled** — master on/off for all exclusions.
 - **Add exclusion…** — small dialog for an IP / CIDR / domain.
 - **Exclusions ▸** — per-entry checkmark (enable/disable) and `Remove`.
+- **Interface ▸** — which interface carries excluded traffic:
+  `Auto-detect` (lowest-metric non-Tailscale default route) or a fixed
+  interface (`Ethernet`, `Wi-Fi`, …). Routes are pinned to that
+  interface's index, so they can't accidentally bind to Tailscale.
 - **Open config…** — opens `%APPDATA%\tail-split\config.json`.
 - **Quit** — restores routes and exits.
 
