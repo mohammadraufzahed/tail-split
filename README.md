@@ -43,10 +43,15 @@ The app asks for administrator elevation on start (route changes require it).
 
 ## Download
 
-Grab `tail-split.exe` from the latest
+Grab `tail-split-setup.exe` (installer) or the portable `tail-split.exe`
+from the latest
 [GitHub Release](https://github.com/mohammadraufzahed/tail-split/releases).
-Releases are built automatically on `v*` tags (windows/amd64, GUI
-subsystem, exe icon embedded).
+
+The installer puts the app in Program Files, registers it in Apps &
+Features, adds a Start Menu shortcut, and can optionally autostart it
+with Windows. Installing a newer release over an old one upgrades in
+place. Releases are built automatically on `v*` tags (windows/amd64,
+GUI subsystem, exe icon embedded).
 
 ## Build
 
