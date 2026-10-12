@@ -1,0 +1,22 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+          cache: true
+      - name: Vet
+        run: go vet ./...
+      - name: Build
+        run: |
+          $env:CGO_ENABLED = "0"
+          go build -ldflags="-H windowsgui" -o tail-split.exe .
